@@ -114,6 +114,7 @@ def train_perceptron(
         # callback para la GUI / plotting / logger
         if callback is not None:
             try:
+                #VALORES DE CADA ITERACION
                 callback(epoch, rms, w.copy(), theta.copy())
             except Exception:
                 # no queremos parar el entrenamiento si el callback falla

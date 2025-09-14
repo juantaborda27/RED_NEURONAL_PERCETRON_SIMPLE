@@ -7,6 +7,7 @@ import threading
 import queue
 import matplotlib.pyplot as plt
 from matplotlib.backends.backend_tkagg import FigureCanvasTkAgg
+import mplcursors  # 👈 nuevo
 from trainer import train_perceptron
 from data_utils import load_simple, dataset_summary
 from pathlib import Path
@@ -18,7 +19,7 @@ class PerceptronApp(tk.Tk):
     def __init__(self):
         super().__init__()
         self.title("Perceptrón Unicapa")
-        self.geometry("1000x650")
+        self.geometry("1100x700")
         self.resizable(True, True)
 
         # estado
@@ -31,6 +32,7 @@ class PerceptronApp(tk.Tk):
         # entrenamiento
         self.train_queue = queue.Queue()
         self.train_thread = None
+        self.history = []  # 👈 historial por iteración
 
         # preparar interfaz
         self.content = tk.Frame(self)
@@ -127,21 +129,42 @@ class PerceptronApp(tk.Tk):
         save_frame = tk.Frame(right)
         save_frame.pack(fill=tk.X, pady=4)
         tk.Button(save_frame, text="Guardar pesos a JSON", command=self.save_weights).pack(side=tk.LEFT)
+        tk.Button(save_frame, text="Guardar historial completo", command=self.save_history).pack(side=tk.LEFT, padx=8)
 
-        # --- plot area ---
-        plot_frame = tk.LabelFrame(right, text="Error de entrenamiento (RMS)", padx=6, pady=6)
+        # --- dentro de show_entrenamiento ---
+        plot_frame = tk.LabelFrame(right, text="Evolución del entrenamiento", padx=6, pady=6)
         plot_frame.pack(fill=tk.BOTH, expand=True, pady=6)
 
-        self.fig, self.ax = plt.subplots(figsize=(6, 3))
-        self.ax.set_xlabel("Iteración")
-        self.ax.set_ylabel("RMS")
-        self.ax.set_title("RMS por iteración")
-        self.train_line_x = []
-        self.train_line_y = []
-        self.train_ln, = self.ax.plot(self.train_line_x, self.train_line_y, '-o')
+        # Solo una gráfica (RMS)
+        self.fig, self.ax_rms = plt.subplots(figsize=(7, 4))
+        self.ax_rms.set_title("Error RMS")
+        self.ax_rms.set_xlabel("Iteración")
+        self.ax_rms.set_ylabel("RMS")
+
+        self.train_line_x, self.train_line_y = [], []
+        self.train_ln, = self.ax_rms.plot([], [], '-o')
 
         self.canvas = FigureCanvasTkAgg(self.fig, master=plot_frame)
         self.canvas.get_tk_widget().pack(fill=tk.BOTH, expand=True)
+
+        # Cursor interactivo con tooltips
+        import mplcursors
+        self.cursor = mplcursors.cursor(self.ax_rms, hover=True)
+
+        @self.cursor.connect("add")
+        def on_add(sel):
+            idx = int(round(sel.target[0]))
+            if 0 <= idx < len(self.history):
+                h = self.history[idx]
+                msg = f"Iteración {h['iter']}\nRMS={h['rms']:.4f}\n\nPesos:\n"
+                flat_w = np.array(h["weights"]).flatten()
+                for j, val in enumerate(flat_w):
+                    msg += f" w{j}: {val:.4f}\n"
+                msg += "\nUmbrales:\n"
+                for j, val in enumerate(h["theta"]):
+                    msg += f" θ{j}: {val:.4f}\n"
+                sel.annotation.set_text(msg)
+
 
         if files:
             self.on_dataset_selected()
@@ -260,6 +283,22 @@ class PerceptronApp(tk.Tk):
         except Exception as e:
             messagebox.showerror("Error al guardar", str(e))
 
+    def save_history(self):
+        if not self.history:
+            messagebox.showinfo("Sin historial", "No hay historial de entrenamiento para guardar.")
+            return
+        fpath = filedialog.asksaveasfilename(defaultextension=".json",
+                                             filetypes=[("JSON files", "*.json")],
+                                             title="Guardar historial completo...")
+        if not fpath:
+            return
+        try:
+            with open(fpath, "w", encoding="utf-8") as f:
+                json.dump(self.history, f, indent=2)
+            messagebox.showinfo("Guardado", f"Historial guardado en:\n{fpath}")
+        except Exception as e:
+            messagebox.showerror("Error al guardar historial", str(e))
+
     # ----------------- Training integration -----------------
     def trainer_callback(self, iteration, rms, w, theta):
         self.train_queue.put((iteration, rms, w, theta))
@@ -293,11 +332,12 @@ class PerceptronApp(tk.Tk):
             messagebox.showerror("Parámetros inválidos", "Revise η, max_iter y ε.")
             return
 
-        self.train_line_x = []
-        self.train_line_y = []
-        self.train_ln.set_data(self.train_line_x, self.train_line_y)
-        self.ax.relim()
-        self.ax.autoscale_view()
+        # limpiar gráfico e historial
+        self.train_line_x, self.train_line_y = [], []
+        self.history = []  # 👈 limpiar historial
+        self.train_ln.set_data([], [])
+        self.ax_rms.relim()
+        self.ax_rms.autoscale_view()
         self.canvas.draw_idle()
 
         self.train_thread = threading.Thread(
@@ -321,10 +361,12 @@ class PerceptronApp(tk.Tk):
             updated = True
             self.weights = w
             self.theta = theta
+            self.history.append({"iter": it, "rms": float(rms),
+                                 "weights": w.tolist(), "theta": theta.tolist()})
             self._display_weights()
         if updated:
-            self.ax.relim()
-            self.ax.autoscale_view()
+            self.ax_rms.relim()
+            self.ax_rms.autoscale_view()
             self.canvas.draw_idle()
 
         if self.train_thread is not None and self.train_thread.is_alive():
