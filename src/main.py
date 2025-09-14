@@ -1,10 +1,10 @@
 # src/main.py
 """
-Interfaz mínima para Perceptrón unicapa:
-- Botones: ENTRENAMIENTO, SIMULACION
+Interfaz mínima para Perceptrón unicapa con entrenamiento en hilo y gráfica en tiempo real.
+- Botones: ENTRENAMIENTO, SIMULACIÓN
 - En ENTRENAMIENTO: seleccionar dataset, mostrar entradas/salidas/patrones,
-  inicializar parámetros aleatorios (pesos y umbral) y mostrar valores.
-Requisitos: python 3.8+, numpy, pandas, tkinter (tk viene con Python).
+  inicializar parámetros aleatorios (pesos y umbral), INICIAR ENTRENAMIENTO y ver gráfica RMS vs iter.
+Requisitos: python 3.8+, numpy, pandas, tkinter, matplotlib.
 """
 
 import tkinter as tk
@@ -14,15 +14,14 @@ import pandas as pd
 import numpy as np
 import json
 import os
-
-
 import threading
 import queue
 import matplotlib.pyplot as plt
 from matplotlib.backends.backend_tkagg import FigureCanvasTkAgg
+
+# IMPORTA trainer desde el mismo folder src (si ejecutas desde src/) o ajusta import si es necesario
 from trainer import train_perceptron
 
-# Carpeta por defecto donde están los datasets (relativa al proyecto)
 DATASETS_FOLDER = Path("datasets")
 
 
@@ -32,11 +31,9 @@ def load_simple(path: Path) -> pd.DataFrame:
     if ext == ".csv":
         return pd.read_csv(path)
     elif ext == ".json":
-        # pd.read_json suele manejar listas de objetos/estructuras tabulares
         try:
             return pd.read_json(path)
         except ValueError:
-            # fallback: leer con json + normalizar
             with open(path, "r", encoding="utf-8") as f:
                 data = json.load(f)
             return pd.json_normalize(data)
@@ -56,7 +53,6 @@ def dataset_summary(df: pd.DataFrame):
     else:
         n_inputs = n_columns - 1  # asumimos última columna target
         n_outputs = 1
-    # columnas de entrada y nombre del target (última columna)
     cols = list(df.columns)
     input_cols = cols[:-1] if len(cols) > 1 else []
     target_col = cols[-1] if len(cols) >= 1 else None
@@ -75,8 +71,19 @@ class PerceptronApp(tk.Tk):
     def __init__(self):
         super().__init__()
         self.title("Perceptrón Unicapa - Interfaz mínima")
-        self.geometry("900x600")
+        self.geometry("1000x650")
         self.resizable(True, True)
+
+        # state
+        self.current_df = None
+        self.current_path = None
+        self.summary = None
+        self.weights = None
+        self.theta = None
+
+        # training thread/queue
+        self.train_queue = queue.Queue()
+        self.train_thread = None
 
         # frames principales
         top_frame = tk.Frame(self)
@@ -94,28 +101,25 @@ class PerceptronApp(tk.Tk):
                                        width=20, height=2, command=self.show_simulacion)
         self.bt_simulacion.pack(side=tk.LEFT, padx=10)
 
-        # area donde se intercambia el contenido
+        # content area
         self.content = tk.Frame(body_frame)
         self.content.pack(fill=tk.BOTH, expand=True)
 
-        # frames para los modos
-        self.entreno_frame = None
-        self.simula_frame = None
+        # store plotting objects
+        self.fig = None
+        self.ax = None
+        self.canvas = None
+        self.train_line_x = []
+        self.train_line_y = []
+        self.train_ln = None
 
-        # estado
-        self.current_df = None
-        self.current_path = None
-        self.summary = None
-        self.weights = None
-        self.theta = None
-
-        # iniciar mostrando entrenamiento por defecto
+        # show entrenamiento by default
         self.show_entrenamiento()
 
-    # ---------- Vistas ----------
+    # ----------------- Views -----------------
     def clear_content(self):
-        for widget in self.content.winfo_children():
-            widget.destroy()
+        for w in self.content.winfo_children():
+            w.destroy()
 
     def show_simulacion(self):
         self.clear_content()
@@ -123,20 +127,18 @@ class PerceptronApp(tk.Tk):
         frame.pack(fill=tk.BOTH, expand=True)
         lbl = tk.Label(frame, text="Módulo SIMULACIÓN (vacío por ahora)", font=("Arial", 14))
         lbl.pack(pady=20)
-        self.simula_frame = frame
 
     def show_entrenamiento(self):
         self.clear_content()
         frame = tk.Frame(self.content)
         frame.pack(fill=tk.BOTH, expand=True)
 
-        # Left panel: selección dataset + info
+        # Left: dataset selector + preview
         left = tk.Frame(frame)
         left.pack(side=tk.LEFT, fill=tk.Y, padx=6, pady=6)
 
         tk.Label(left, text="Seleccionar dataset:", font=("Arial", 11)).pack(anchor="w")
-        # Combobox con archivos encontrados
-        self.dataset_combobox = ttk.Combobox(left, state="readonly", width=40)
+        self.dataset_combobox = ttk.Combobox(left, state="readonly", width=50)
         self.dataset_combobox.pack(anchor="w", pady=4)
         files = self.scan_datasets()
         self.dataset_combobox["values"] = files
@@ -144,10 +146,8 @@ class PerceptronApp(tk.Tk):
             self.dataset_combobox.current(0)
         self.dataset_combobox.bind("<<ComboboxSelected>>", self.on_dataset_selected)
 
-        # Opción para cargar file arbitrario
         tk.Button(left, text="Cargar otro archivo...", command=self.load_other_file).pack(anchor="w", pady=6)
 
-        # Info simple (entradas/salidas/patrones)
         info_frame = tk.LabelFrame(left, text="Resumen", padx=6, pady=6)
         info_frame.pack(fill=tk.X, pady=6)
         self.lbl_patrones = tk.Label(info_frame, text="Patrones: -")
@@ -156,17 +156,16 @@ class PerceptronApp(tk.Tk):
         self.lbl_entradas.pack(anchor="w")
         self.lbl_salidas = tk.Label(info_frame, text="Salidas: -")
         self.lbl_salidas.pack(anchor="w")
-        self.lbl_cols = tk.Label(info_frame, text="Columnas: -", wraplength=280, justify="left")
+        self.lbl_cols = tk.Label(info_frame, text="Columnas: -", wraplength=320, justify="left")
         self.lbl_cols.pack(anchor="w", pady=(4,0))
 
-        # Preview de las primeras filas
         preview_frame = tk.LabelFrame(left, text="Preview (5 primeros)", padx=6, pady=6)
         preview_frame.pack(fill=tk.BOTH, expand=False, pady=6)
-        self.txt_preview = tk.Text(preview_frame, height=8, width=50)
+        self.txt_preview = tk.Text(preview_frame, height=8, width=60)
         self.txt_preview.pack(side=tk.LEFT, fill=tk.BOTH, expand=True)
         self.txt_preview.configure(state="disabled")
 
-        # Right panel: parámetros e inicialización
+        # Right: params, init, weights, plot
         right = tk.Frame(frame)
         right.pack(side=tk.LEFT, fill=tk.BOTH, expand=True, padx=6, pady=6)
 
@@ -188,33 +187,45 @@ class PerceptronApp(tk.Tk):
         self.entry_epsilon.insert(0, "0.01")
         self.entry_epsilon.grid(row=2, column=1, sticky="w", padx=6, pady=2)
 
-        # Inicializar parámetros
         init_frame = tk.Frame(right)
         init_frame.pack(fill=tk.X, pady=8)
         self.bt_init = tk.Button(init_frame, text="Inicializar parámetros aleatorios",
                                  command=self.initialize_parameters, state="disabled")
-        self.bt_init.pack(anchor="w")
+        self.bt_init.pack(side=tk.LEFT, anchor="w", padx=(0,8))
+        self.bt_start = tk.Button(init_frame, text="Iniciar entrenamiento", command=self.start_training, state="disabled")
+        self.bt_start.pack(side=tk.LEFT, anchor="w")
 
-        # Mostrar pesos y theta
         weights_frame = tk.LabelFrame(right, text="Pesos y umbral (θ)", padx=6, pady=6)
-        weights_frame.pack(fill=tk.BOTH, expand=True, pady=6)
-        self.txt_weights = tk.Text(weights_frame, height=15)
+        weights_frame.pack(fill=tk.BOTH, expand=False, pady=6)
+        self.txt_weights = tk.Text(weights_frame, height=8)
         self.txt_weights.pack(fill=tk.BOTH, expand=True)
         self.txt_weights.configure(state="disabled")
 
-        # Guardar botón (por si quiere exportar)
         save_frame = tk.Frame(right)
         save_frame.pack(fill=tk.X, pady=4)
         tk.Button(save_frame, text="Guardar pesos a JSON", command=self.save_weights).pack(side=tk.LEFT)
 
-        self.entreno_frame = frame
+        # --- plot area ---
+        plot_frame = tk.LabelFrame(right, text="Error de entrenamiento (RMS)", padx=6, pady=6)
+        plot_frame.pack(fill=tk.BOTH, expand=True, pady=6)
 
-        # Si había archivos, seleccionar el primero por defecto
+        # create matplotlib figure (store as attributes)
+        self.fig, self.ax = plt.subplots(figsize=(6, 3))
+        self.ax.set_xlabel("Iteración")
+        self.ax.set_ylabel("RMS")
+        self.ax.set_title("RMS por iteración")
+        self.train_line_x = []
+        self.train_line_y = []
+        self.train_ln, = self.ax.plot(self.train_line_x, self.train_line_y, '-o')
+
+        self.canvas = FigureCanvasTkAgg(self.fig, master=plot_frame)
+        self.canvas.get_tk_widget().pack(fill=tk.BOTH, expand=True)
+
+        # finalize view
         if files:
-            # for initial load fire selection
             self.on_dataset_selected()
 
-    # ---------- acciones ----------
+    # ----------------- Actions -----------------
     def scan_datasets(self):
         p = DATASETS_FOLDER
         if not p.exists():
@@ -229,7 +240,6 @@ class PerceptronApp(tk.Tk):
         file = filedialog.askopenfilename(title="Seleccionar dataset",
                                           filetypes=[("CSV files", "*.csv"), ("JSON files", "*.json"), ("Excel files", "*.xlsx;*.xls")])
         if file:
-            # si quiere, añadimos a combobox (no persistimos)
             vals = list(self.dataset_combobox["values"])
             if file not in vals:
                 vals.append(file)
@@ -251,7 +261,8 @@ class PerceptronApp(tk.Tk):
         self.current_df = df
         self.current_path = sel
         self.summary = dataset_summary(df)
-        # actualizar labels
+
+        # update labels
         self.lbl_patrones.config(text=f"Patrones: {self.summary['patrones']}")
         self.lbl_entradas.config(text=f"Entradas: {self.summary['entradas']}")
         self.lbl_salidas.config(text=f"Salidas: {self.summary['salidas']}")
@@ -265,9 +276,10 @@ class PerceptronApp(tk.Tk):
         self.txt_preview.insert(tk.END, preview_df.to_string(index=False))
         self.txt_preview.configure(state="disabled")
 
-        # habilitar inicialización
+        # enable init + start buttons
         self.bt_init.configure(state="normal")
-        # limpiar pesos previos
+        self.bt_start.configure(state="normal")
+        # clear weights display
         self.weights = None
         self.theta = None
         self._display_weights()
@@ -277,20 +289,14 @@ class PerceptronApp(tk.Tk):
             messagebox.showwarning("Dataset no seleccionado", "Seleccione primero un dataset.")
             return
         n_inputs = self.summary["entradas"]
-        n_outputs = self.summary["salidas"]  # asumimos 1 por defecto, puede ser >1 en general
+        n_outputs = self.summary["salidas"]
 
-        # CORRECCIÓN: pesos w con forma (n_inputs, n_outputs)
-        # Cada columna de w corresponde a los pesos para una salida.
         if n_inputs <= 0:
-            # caso borde: sin entradas
             self.weights = np.zeros((0, n_outputs))
         else:
             self.weights = np.random.uniform(-1.0, 1.0, size=(n_inputs, n_outputs))
 
-        # theta: umbral por salida (vector length = n_outputs)
         self.theta = np.random.uniform(-1.0, 1.0, size=(n_outputs,))
-
-        # mostrar en el text widget
         self._display_weights()
 
     def _display_weights(self):
@@ -301,15 +307,13 @@ class PerceptronApp(tk.Tk):
         else:
             self.txt_weights.insert(tk.END, f"Pesos (w) shape: {self.weights.shape}  (n_inputs x n_outputs)\n\n")
             n_inputs, n_outputs = self.weights.shape
-            # Mostrar por salida (columna)
             for out_idx in range(n_outputs):
                 col = self.weights[:, out_idx]
                 self.txt_weights.insert(tk.END, f"Salida {out_idx} (pesos para cada entrada): {np.array2string(col, precision=4)}\n")
             self.txt_weights.insert(tk.END, f"\nUmbral θ (por salida): {np.array2string(self.theta, precision=4)}\n")
-            # mostrar también valores de η, max_iter, epsilon actuales
-            eta = self.entry_eta.get().strip() if self.entry_eta.get().strip() else "0.1"
-            maxiter = self.entry_maxiter.get().strip() if self.entry_maxiter.get().strip() else "1000"
-            eps = self.entry_epsilon.get().strip() if self.entry_epsilon.get().strip() else "0.01"
+            eta = self.entry_eta.get().strip() or "0.1"
+            maxiter = self.entry_maxiter.get().strip() or "1000"
+            eps = self.entry_epsilon.get().strip() or "0.01"
             self.txt_weights.insert(tk.END, f"\nParámetros actuales:\n η = {eta}\n max_iter = {maxiter}\n ε = {eps}\n")
         self.txt_weights.configure(state="disabled")
 
@@ -317,7 +321,6 @@ class PerceptronApp(tk.Tk):
         if self.weights is None:
             messagebox.showinfo("Sin pesos", "No hay pesos para guardar. Inicialice primero.")
             return
-        # pedir ruta para guardar
         fpath = filedialog.asksaveasfilename(defaultextension=".json", filetypes=[("JSON files", "*.json")],
                                              title="Guardar pesos como...")
         if not fpath:
@@ -337,24 +340,103 @@ class PerceptronApp(tk.Tk):
         except Exception as e:
             messagebox.showerror("Error al guardar", str(e))
 
+    # ----------------- Training integration -----------------
+    def trainer_callback(self, iteration, rms, w, theta):
+        """Callback llamado desde el hilo de entrenamiento; pone datos en la cola."""
+        self.train_queue.put((iteration, rms, w, theta))
 
-# ---------- Run ----------
+    def start_training(self):
+        """Inicia el entrenamiento en un hilo separado y comienza polling para la gráfica."""
+        if self.current_df is None:
+            messagebox.showwarning("No dataset", "Seleccione un dataset primero")
+            return
+
+        input_cols = self.summary["input_cols"]
+        target_col = self.summary["target_col"]
+        if not input_cols or target_col is None:
+            messagebox.showerror("Dataset inválido", "El dataset no tiene columnas de entrada o salida correctamente detectadas.")
+            return
+
+        X = self.current_df[input_cols].to_numpy(dtype=float)
+        d = self.current_df[[target_col]].to_numpy(dtype=float)  # (N,1)
+
+        n_inputs = X.shape[1]
+        n_outputs = 1
+        if self.weights is None or self.weights.shape != (n_inputs, n_outputs):
+            self.weights = np.random.uniform(-1, 1, size=(n_inputs, n_outputs))
+        if self.theta is None or self.theta.shape != (n_outputs,):
+            self.theta = np.random.uniform(-1, 1, size=(n_outputs,))
+
+        try:
+            eta = float(self.entry_eta.get())
+            max_iter = int(self.entry_maxiter.get())
+            eps = float(self.entry_epsilon.get())
+        except Exception:
+            messagebox.showerror("Parámetros inválidos", "Revise η, max_iter y ε.")
+            return
+
+        # limpiar gráfica previa
+        self.train_line_x = []
+        self.train_line_y = []
+        self.train_ln.set_data(self.train_line_x, self.train_line_y)
+        self.ax.relim()
+        self.ax.autoscale_view()
+        self.canvas.draw_idle()
+
+        # lanzar hilo de entrenamiento
+        self.train_thread = threading.Thread(
+            target=lambda: train_perceptron(X, d, self.weights, self.theta,
+                                            eta=eta, max_iter=max_iter, epsilon=eps,
+                                            callback=self.trainer_callback, verbose=False, shuffle=True),
+            daemon=True
+        )
+        self.train_thread.start()
+        # iniciar polling
+        self.after(50, self.poll_training_queue)
+        # bloquear botones para evitar lanzar múltiples hilos
+        self.bt_start.configure(state="disabled")
+        self.bt_init.configure(state="disabled")
+
+    def poll_training_queue(self):
+        updated = False
+        while not self.train_queue.empty():
+            it, rms, w, theta = self.train_queue.get_nowait()
+            self.train_line_x.append(it)
+            self.train_line_y.append(rms)
+            self.train_ln.set_data(self.train_line_x, self.train_line_y)
+            updated = True
+            # actualizar pesos en UI
+            self.weights = w
+            self.theta = theta
+            self._display_weights()
+        if updated:
+            self.ax.relim()
+            self.ax.autoscale_view()
+            self.canvas.draw_idle()
+
+        # seguir polling si el hilo sigue vivo
+        if self.train_thread is not None and self.train_thread.is_alive():
+            self.after(50, self.poll_training_queue)
+        else:
+            # reactivar botones
+            self.bt_start.configure(state="normal")
+            self.bt_init.configure(state="normal")
+            # procesar cualquier dato residual en la cola
+            if not self.train_queue.empty():
+                self.after(50, self.poll_training_queue)
+            else:
+                messagebox.showinfo("Entrenamiento", "Entrenamiento finalizado.")
+
+# ---------- run ----------
 def main():
-    # ensure datasets folder exists (no se requiere que tenga archivos)
     if not DATASETS_FOLDER.exists():
         try:
             os.makedirs(DATASETS_FOLDER)
         except Exception:
             pass
-
     app = PerceptronApp()
     app.mainloop()
 
 
 if __name__ == "__main__":
     main()
-
-
-
-
-
