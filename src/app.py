@@ -11,6 +11,7 @@ import mplcursors  # 👈 nuevo
 from trainer import train_perceptron
 from data_utils import load_simple, dataset_summary
 from pathlib import Path
+from simulation_view import SimulationFrame
 
 DATASETS_FOLDER = Path("datasets")
 
@@ -403,3 +404,8 @@ class PerceptronApp(tk.Tk):
                 self.after(50, self.poll_training_queue)
             else:
                 messagebox.showinfo("Entrenamiento", "Entrenamiento finalizado.")
+    
+    def show_simulacion(self):
+        self.clear_content()
+        frame = SimulationFrame(self.content)
+        frame.pack(fill=tk.BOTH, expand=True)
