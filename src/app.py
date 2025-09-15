@@ -34,7 +34,32 @@ class PerceptronApp(tk.Tk):
         self.train_thread = None
         self.history = []  # 👈 historial por iteración
 
-        # preparar interfaz
+        # # preparar interfaz
+        # self.content = tk.Frame(self)
+        # self.content.pack(fill=tk.BOTH, expand=True)
+
+        # # mostrar entrenamiento por defecto
+        # self.show_entrenamiento()
+
+        # ---- barra superior con botones ----
+        top_frame = tk.Frame(self)
+        top_frame.pack(side=tk.TOP, fill=tk.X, padx=8, pady=8)
+
+        self.bt_entrenamiento = tk.Button(
+            top_frame, text="ENTRENAMIENTO",
+            width=20, height=2,
+            command=self.show_entrenamiento
+        )
+        self.bt_entrenamiento.pack(side=tk.LEFT, padx=10)
+
+        self.bt_simulacion = tk.Button(
+            top_frame, text="SIMULACIÓN",
+            width=20, height=2,
+            command=self.show_simulacion
+        )
+        self.bt_simulacion.pack(side=tk.LEFT, padx=10)
+
+        # ---- contenido dinámico ----
         self.content = tk.Frame(self)
         self.content.pack(fill=tk.BOTH, expand=True)
 
