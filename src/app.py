@@ -230,27 +230,46 @@ class PerceptronApp(tk.Tk):
             messagebox.showerror("Error al cargar", f"No se pudo leer el archivo:\n{e}")
             return
 
-        self.current_df = df
-        self.current_path = sel
-        self.summary = dataset_summary(df)
+        # Particionar en 80% entrenamiento y 20% prueba
+        total = len(df)
+        train_size = int(0.8 * total)
+        df_train = df.sample(frac=0.8, random_state=42)   # 80%
+        df_test = df.drop(df_train.index)                 # 20%
 
-        self.lbl_patrones.config(text=f"Patrones: {self.summary['patrones']}")
+        # Guardar en el estado actual (solo usamos entrenamiento aquí)
+        self.current_df = df_train.reset_index(drop=True)
+        self.current_test = df_test.reset_index(drop=True)
+        self.current_path = sel
+        self.summary = dataset_summary(self.current_df)
+
+        # Mostrar mensaje
+        messagebox.showinfo(
+            "Dataset particionado",
+            f"El dataset fue particionado en 80% entrenamiento ({len(df_train)}) "
+            f"y 20% prueba ({len(df_test)})."
+        )
+
+        # Actualizar labels
+        self.lbl_patrones.config(text=f"Patrones (train): {self.summary['patrones']}")
         self.lbl_entradas.config(text=f"Entradas: {self.summary['entradas']}")
         self.lbl_salidas.config(text=f"Salidas: {self.summary['salidas']}")
         cols_text = ", ".join(self.summary["columns"])
         self.lbl_cols.config(text=f"Columnas: {cols_text}")
 
+        # Preview del conjunto de entrenamiento
         self.txt_preview.configure(state="normal")
         self.txt_preview.delete("1.0", tk.END)
-        preview_df = df.head(5)
+        preview_df = self.current_df.head(5)
         self.txt_preview.insert(tk.END, preview_df.to_string(index=False))
         self.txt_preview.configure(state="disabled")
 
+        # Activar botones
         self.bt_init.configure(state="normal")
         self.bt_start.configure(state="normal")
         self.weights = None
         self.theta = None
         self._display_weights()
+
 
     def initialize_parameters(self):
         if self.summary is None:
